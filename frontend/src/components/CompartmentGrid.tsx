@@ -1,0 +1,4 @@
+import type { Slot } from '../types';
+export function CompartmentGrid({slots}:{slots:Slot[]}){
+  return <section className="panel inventory"><div className="section-heading"><div><span className="eyebrow">LIVE INVENTORY</span><h2>Compartment map</h2></div><span className="refresh">{slots.length?`${slots.length} slots`:'Loading…'}</span></div><div className="slot-grid">{slots.map(slot=><article className="slot-card" key={slot.slotId}><header><strong>Slot {slot.slotNo}</strong><span>{slot.slotName}</span><i className={slot.status==='ACTIVE'?'online':''}/></header><div className="compartments">{slot.compartments.map(c=><div className={`compartment ${c.occupancyStatus==='OCCUPIED'?'occupied':''}`} key={c.compartmentId}><span className="comp-no">C{c.compartmentNo}</span><b>{c.occupancyStatus==='OCCUPIED'?'In use':c.occupancyStatus==='EMPTY'?'Available':'Offline'}</b>{c.parcel&&<small>{c.parcel.trackingId}</small>}</div>)}</div></article>)}</div></section>;
+}
