@@ -1,0 +1,7 @@
+import { FormEvent, useState } from 'react';
+import { api } from '../api';
+export function ParcelRegistration(){
+  const [notice,setNotice]=useState('');
+  async function submit(e:FormEvent<HTMLFormElement>){e.preventDefault();const form=e.currentTarget;setNotice('');const f=new FormData(form);try{const r=await api<{tracking_id:string;parcel_id:string}>('/api/parcels',{method:'POST',body:JSON.stringify({registrationNo:f.get('registrationNo'),studentName:f.get('studentName'),trackingId:f.get('trackingId'),paymentType:f.get('paymentType')})});setNotice(`Parcel ${r.tracking_id} registered.`);form.reset();}catch(err){setNotice(err instanceof Error?err.message:'Could not register parcel.');}}
+  return <section className="panel"><div className="section-heading"><div><span className="eyebrow">INBOUND</span><h2>Register a parcel</h2></div><span className="step">01</span></div><form onSubmit={submit} className="form-grid"><label>Student name<input required name="studentName" placeholder="e.g. Asha Patel"/></label><label>Registration number<input required name="registrationNo" placeholder="e.g. 24CS104"/></label><label>Tracking ID<input required name="trackingId" placeholder="Scan or enter ID"/></label><label>Payment type<select name="paymentType"><option value="PREPAID">Prepaid</option><option value="COD">Cash on delivery</option></select></label><button className="primary" type="submit">Add to parcel queue <span>↗</span></button></form>{notice&&<p className="notice">{notice}</p>}</section>;
+}
