@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: smartpick
+    runtime: node
+    buildCommand: npm ci --prefix backend && npm ci --prefix frontend && npm run build --prefix backend && npm run build --prefix frontend
+    startCommand: npm --prefix backend start
+    healthCheckPath: /api/health/db
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: OPERATOR_LOGIN_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: ESP32_API_KEY
+        sync: false

@@ -1,12 +1,12 @@
 {
   "name": "smartpick",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node server.mjs",
-    "start": "node server.mjs",
-    "test": "node --test",
-    "build": "node build.mjs"
+    "dev": "npm --prefix frontend run dev",
+    "dev:backend": "npm --prefix backend run dev",
+    "start": "npm --prefix backend start",
+    "build": "npm run build --prefix backend && npm run build --prefix frontend"
   }
 }
