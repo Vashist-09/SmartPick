@@ -24,7 +24,13 @@ Open `http://localhost:5173`. The API is at `http://localhost:5050`. Operator ro
 
 ## Deploy
 
-`render.yaml` deploys the API and built React frontend as one same-origin Render web service. Push this repository to GitHub, then in Render choose **New → Blueprint** and select the repository and branch containing `render.yaml`. During setup, provide these values in Render:
+`render.yaml` contains the configuration for deploying the API and built React frontend as one same-origin Render web service. You can enter the same settings when creating a Web Service manually. During setup, provide these values in Render:
+
+If creating the service manually as a **Web Service**, leave Root Directory blank and use:
+
+- Build Command: `npm ci --include=dev --prefix backend && npm ci --include=dev --prefix frontend && npm run build --prefix backend && npm run build --prefix frontend`
+- Start Command: `npm --prefix backend start`
+- Health Check Path: `/api/health/db`
 
 - `DATABASE_URL`: the connection string for the existing Neon database.
 - `OPERATOR_LOGIN_PASSWORD`: the parcel desk sign-in password.
