@@ -14,13 +14,23 @@ No work: `{"command":null}`. Map slot and compartment numbers to pins in firmwar
 
 ## Removal event
 
-After the sensor confirms removal, post `POST /api/device/events`:
+After the IR sensor has been debounced and confirms an occupied compartment became empty, post `POST /api/device/events`. The simplest firmware payload uses the physical location, so it does not need database UUIDs:
+
+```json
+{"sourceEventKey":"unit-1-s1-c2-000042","slotNo":1,"compartmentNo":2,"occurredAt":"2026-10-19T10:20:30.000Z"}
+```
+
+The backend resolves that location to the currently stored parcel, then in one database transaction marks the parcel `COLLECTED`, sets the compartment to `EMPTY`, records the hardware event, and adds an activity log. A successful response is `{"processed":true}`. If there is no matching stored parcel, the API returns HTTP 409; check the slot and compartment records and the parcel's stored state.
+
+Firmware that already has the database IDs can instead post:
 
 ```json
 {"sourceEventKey":"stable-device-event-id","parcelId":"uuid","compartmentId":"uuid","occurredAt":"2026-10-19T10:20:30.000Z"}
 ```
 
-`occurredAt` is optional. `sourceEventKey` must be 1–100 characters, matching the database column. Retrying the same physical event must reuse `sourceEventKey`; the database uniqueness constraint deduplicates retries. Only a matching stored parcel and occupied compartment are processed. Mismatched or stale events return HTTP 409 and are recorded as rejected when possible.
+`occurredAt` is optional. `sourceEventKey` must be 1–100 characters, matching the database column. Retrying the same physical event must reuse `sourceEventKey`; generate a new key for each later removal. The database uniqueness constraint deduplicates retries. Only a matching stored parcel and occupied compartment are processed. Mismatched or stale UUID-based events return HTTP 409 and are recorded as rejected when possible.
+
+Posting `EXECUTED` to the command result endpoint only confirms that the light command ran; it does not mean the parcel was collected. The firmware must separately post the removal event after the IR sensor detects removal. Check the HTTP response from this event call on the ESP32 when debugging database updates.
 
 ## Delivery limits
 

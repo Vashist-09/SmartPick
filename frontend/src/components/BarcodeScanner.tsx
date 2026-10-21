@@ -9,7 +9,10 @@ export function BarcodeScanner({ onScan, onClose }: { onScan: (value: string) =>
     const reader = new BrowserMultiFormatReader();
     let controls: IScannerControls | undefined;
     let active = true;
-    void reader.decodeFromVideoDevice(undefined, videoRef.current!, (result, error, scannerControls) => {
+    void reader.decodeFromConstraints({
+      audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    }, videoRef.current!, (result, error, scannerControls) => {
       controls = scannerControls;
       if (result && active) {
         active = false;

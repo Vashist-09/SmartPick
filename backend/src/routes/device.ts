@@ -32,17 +32,39 @@ router.post('/events',asyncRoute(async(req,res)=>{
   const out=await withTx(async c=>{
     const device=await c.query(`SELECT device_id FROM hardware_devices ORDER BY created_at LIMIT 1`);
     if(!device.rowCount)return {error:503,message:'No device configured'};
-    const inserted=await c.query(`INSERT INTO hardware_events(device_id,source_event_key,parcel_id,compartment_id,event_type,processing_status,occurred_at) VALUES($1,$2,$3,$4,'PARCEL_REMOVED','RECEIVED',$5) ON CONFLICT(device_id,source_event_key) DO NOTHING RETURNING event_id`,[device.rows[0].device_id,body.data.sourceEventKey,body.data.parcelId,body.data.compartmentId,body.data.occurredAt??null]);
-    if(!inserted.rowCount){const prev=await c.query(`SELECT processing_status FROM hardware_events WHERE device_id=$1 AND source_event_key=$2`,[device.rows[0].device_id,body.data.sourceEventKey]);return {duplicate:true,status:prev.rows[0]?.processing_status};}
-    const eventId=inserted.rows[0].event_id;
-    const parcel=await c.query(`SELECT p.student_id,p.parcel_status,p.compartment_id,c.occupancy_status,s.slot_id FROM parcels p LEFT JOIN compartments c ON c.compartment_id=p.compartment_id LEFT JOIN slots s ON s.slot_id=c.slot_id WHERE p.parcel_id=$1 FOR UPDATE OF p`,[body.data.parcelId]);
-    if(!parcel.rowCount||parcel.rows[0].parcel_status!=='STORED'||parcel.rows[0].compartment_id!==body.data.compartmentId||parcel.rows[0].occupancy_status!=='OCCUPIED'){
-      await c.query(`UPDATE hardware_events SET processing_status='REJECTED',processed_at=NOW() WHERE event_id=$1`,[eventId]); return {rejected:true};
+    const deviceId=device.rows[0].device_id;
+    const previous=await c.query(`SELECT processing_status FROM hardware_events WHERE device_id=$1 AND source_event_key=$2`,[deviceId,body.data.sourceEventKey]);
+    if(previous.rowCount)return {duplicate:true,status:previous.rows[0].processing_status};
+
+    const physicalEvent='slotNo'in body.data;
+    let parcel;
+    if('slotNo'in body.data){
+      parcel=await c.query(`SELECT p.parcel_id,p.student_id,p.parcel_status,p.compartment_id,c.occupancy_status,s.slot_id
+          FROM slots s JOIN compartments c USING(slot_id) JOIN parcels p ON p.compartment_id=c.compartment_id AND p.parcel_status='STORED'
+          WHERE s.slot_no=$1 AND c.compartment_no=$2 FOR UPDATE OF c,p`,[body.data.slotNo,body.data.compartmentNo]);
+    }else{
+      parcel=await c.query(`SELECT p.parcel_id,p.student_id,p.parcel_status,p.compartment_id,c.occupancy_status,s.slot_id
+          FROM parcels p JOIN compartments c ON c.compartment_id=p.compartment_id JOIN slots s USING(slot_id)
+          WHERE p.parcel_id=$1 FOR UPDATE OF p,c`,[body.data.parcelId]);
     }
-    await c.query(`UPDATE parcels SET parcel_status='COLLECTED',collected_at=NOW() WHERE parcel_id=$1`,[body.data.parcelId]);
-    await c.query(`UPDATE compartments SET occupancy_status='EMPTY' WHERE compartment_id=$1`,[body.data.compartmentId]);
+    if(!parcel.rowCount)return {error:physicalEvent?409:404,message:physicalEvent?'No stored parcel matches that slot and compartment':'Parcel not found'};
+
+    const resolvedParcelId=parcel.rows[0].parcel_id;
+    const resolvedCompartmentId=parcel.rows[0].compartment_id;
+    if(parcel.rows[0].parcel_status!=='STORED'||parcel.rows[0].occupancy_status!=='OCCUPIED'||('compartmentId'in body.data&&resolvedCompartmentId!==body.data.compartmentId)){
+      const rejectedCompartmentId='compartmentId'in body.data?body.data.compartmentId:resolvedCompartmentId;
+      const rejected=await c.query(`INSERT INTO hardware_events(device_id,source_event_key,parcel_id,compartment_id,event_type,processing_status,occurred_at) VALUES($1,$2,$3,$4,'PARCEL_REMOVED','REJECTED',$5) ON CONFLICT(device_id,source_event_key) DO NOTHING`,[deviceId,body.data.sourceEventKey,resolvedParcelId,rejectedCompartmentId,body.data.occurredAt??null]);
+      if(!rejected.rowCount){const prev=await c.query(`SELECT processing_status FROM hardware_events WHERE device_id=$1 AND source_event_key=$2`,[deviceId,body.data.sourceEventKey]);return {duplicate:true,status:prev.rows[0]?.processing_status};}
+      return {rejected:true};
+    }
+
+    const inserted=await c.query(`INSERT INTO hardware_events(device_id,source_event_key,parcel_id,compartment_id,event_type,processing_status,occurred_at) VALUES($1,$2,$3,$4,'PARCEL_REMOVED','RECEIVED',$5) ON CONFLICT(device_id,source_event_key) DO NOTHING RETURNING event_id`,[deviceId,body.data.sourceEventKey,resolvedParcelId,resolvedCompartmentId,body.data.occurredAt??null]);
+    if(!inserted.rowCount){const prev=await c.query(`SELECT processing_status FROM hardware_events WHERE device_id=$1 AND source_event_key=$2`,[deviceId,body.data.sourceEventKey]);return {duplicate:true,status:prev.rows[0]?.processing_status};}
+    const eventId=inserted.rows[0].event_id;
+    await c.query(`UPDATE parcels SET parcel_status='COLLECTED',collected_at=NOW() WHERE parcel_id=$1`,[resolvedParcelId]);
+    await c.query(`UPDATE compartments SET occupancy_status='EMPTY' WHERE compartment_id=$1`,[resolvedCompartmentId]);
     await c.query(`UPDATE hardware_events SET processing_status='PROCESSED',processed_at=NOW() WHERE event_id=$1`,[eventId]);
-    await c.query(`INSERT INTO activity_logs(parcel_id,student_id,slot_id,compartment_id,device_id,event_type,details) VALUES($1,$2,$3,$4,$5,'PARCEL_REMOVED',$6)`,[body.data.parcelId,parcel.rows[0].student_id,parcel.rows[0].slot_id,body.data.compartmentId,device.rows[0].device_id,{sourceEventKey:body.data.sourceEventKey}]);
+    await c.query(`INSERT INTO activity_logs(parcel_id,student_id,slot_id,compartment_id,device_id,event_type,details) VALUES($1,$2,$3,$4,$5,'PARCEL_REMOVED',$6)`,[resolvedParcelId,parcel.rows[0].student_id,parcel.rows[0].slot_id,resolvedCompartmentId,deviceId,{sourceEventKey:body.data.sourceEventKey}]);
     return {processed:true};
   });
   if('error'in out)return res.status(out.error ?? 500).json({error:out.message});
