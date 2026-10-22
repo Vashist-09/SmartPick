@@ -48,7 +48,7 @@ Students can only read their own parcels/activity and pickup attempts. Identity/
 
 COD settlement is recorded by staff with a receipt/reference before pickup can start. The app does not charge cards or integrate a payment processor. Proxy collection remains a staff decision recorded in the verification note; students cannot authorize another account themselves.
 
-The scanner in the old demo remains a placeholder. The connected app uses the verified student's parcel list instead of treating a scanned registration number as authentication.
+The operator desk retains camera barcode scanning with manual entry. Scanning selects a student lookup; staff still record a collector identity check. The scanner in the old demo remains a placeholder. The connected app uses the verified student's parcel list instead of treating a scanned registration number as authentication.
 
 ## Email delivery
 
@@ -79,7 +79,7 @@ See [backend/ESP32_API.md](backend/ESP32_API.md) for firmware behavior and [docs
 ```sh
 # Existing local demo tests, independent of backend dependencies
 npm test
-npm run build
+npm run build:student
 
 # Backend build and integration suite (suite skips without TEST_DATABASE_URL)
 npm run build --prefix backend
@@ -97,7 +97,7 @@ A local browser preview can be seeded with `TEST_DATABASE_URL=.../smartpick_test
 
 ## Deployment
 
-Build outputs are `dist/`, `backend/dist/` and `frontend/dist/`. Deploy both frontends with an `/api` reverse proxy to the backend; the root static build alone cannot serve connected APIs. The root `server.mjs` is a local development server and serves source files. Set `NODE_ENV=production`, HTTPS, exact comma-separated `CORS_ORIGIN` values, `STUDENT_APP_ORIGIN`, device key and mail gateway secrets. Host apps and API on the same site for SameSite=Lax cookies. Never copy database/device/mail credentials into frontend configuration.
+Build outputs are `dist/`, `backend/dist/` and `frontend/dist/`. The backend serves the operator build at `/` and the student build at `/student/`, preserving the Render deployment. Set `STUDENT_APP_ORIGIN` to `https://YOUR-HOST/student` for those verification links. Root `npm run build` builds all three apps. Alternatively, deploy both frontends with an `/api` reverse proxy to the backend; the root static build alone cannot serve connected APIs. The root `server.mjs` is a local development server and serves source files. Set `NODE_ENV=production`, HTTPS, exact comma-separated `CORS_ORIGIN` values, `STUDENT_APP_ORIGIN`, device key and mail gateway secrets. Host apps and API on the same site for SameSite=Lax cookies. Never copy database/device/mail credentials into frontend configuration.
 
 Before rollout, apply the migration against a backup/staging copy of the actual schema and test the physical device. No existing database credentials, real email service or firmware were available during implementation.
 

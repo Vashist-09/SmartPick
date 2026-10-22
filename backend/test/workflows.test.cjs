@@ -51,6 +51,12 @@ test('full account, authorization, inventory and device lifecycle', { skip: !url
             const r = await fetch(base + '/api/auth/login', { method: 'POST', headers: { Origin: 'http://localhost:5173', 'Content-Type': 'application/json' }, body: '{broken' });
             assert.equal(r.status, 400);
         });
+        await t.test('same-origin deployment serves both apps and allows browser writes', {skip:!fs.existsSync(path.join(__dirname,'../../dist/index.html'))||!fs.existsSync(path.join(__dirname,'../../frontend/dist/index.html'))}, async()=>{
+            assert.match(await (await fetch(base+'/')).text(), /Parcel desk/);
+            assert.match(await (await fetch(base+'/student/')).text(), /Your parcel, found/);
+            assert.equal((await fetch(base+'/src/live.js')).status,200);
+            assert.equal((await req('/api/auth/logout',{method:'POST',origin:base})).status,200);
+        });
         let studentCookie, studentId, otherCookie;
         await t.test('verification is single-use and does not approve a typed identity', async () => {
             const register = await req('/api/auth/register', { method: 'POST', body: { email: 'asha@example.test', password: 'a long student password', fullName: 'Asha Patel', registrationNo: '24cs104' } });

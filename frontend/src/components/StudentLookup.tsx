@@ -1,4 +1,5 @@
-import { FormEvent, useState, useRef, useEffect } from 'react';
+import { useCallback, FormEvent, useState, useRef, useEffect } from 'react';
+import { BarcodeScanner } from './BarcodeScanner';
 import { api } from '../api';
 import type { Parcel } from '../types';
 export function StudentLookup({ onRetrieve, revision }: {
@@ -7,6 +8,9 @@ export function StudentLookup({ onRetrieve, revision }: {
 }) {
     const [rows, setRows] = useState<Parcel[]>([]), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false), [searched, setSearched] = useState(false), [lookupRegistration, setLookupRegistration] = useState('');
     const seq = useRef(0);
+    const formRef = useRef<HTMLFormElement>(null);
+    const [scanning,setScanning] = useState(false);
+    const scan = useCallback((value:string)=>{setScanning(false);const input=formRef.current?.elements.namedItem('registrationNo') as HTMLInputElement|null;if(input){input.value=value;formRef.current?.requestSubmit();}},[]);
     useEffect(() => {
         setRows([]);
         setLookupRegistration('');
@@ -62,12 +66,12 @@ export function StudentLookup({ onRetrieve, revision }: {
                 setBusy(false);
         }
     }
-    return <section className="panel"><h2>Find a student</h2><form className="inline-form" onSubmit={submit}><label className="grow">Registration number<input name="registrationNo" required maxLength={30} onChange={() => {
+    return <section className="panel"><h2>Find a student</h2><form ref={formRef} className="inline-form" onSubmit={submit}><label className="grow">Registration number<input name="registrationNo" required maxLength={30} onChange={() => {
             seq.current++;
             setRows([]);
             setLookupRegistration('');
             setSearched(false);
             setBusy(false);
             onRetrieve(null);
-        }}/></label><button className="secondary" disabled={busy}>{busy ? 'Looking up…' : 'Look up'}</button></form>{notice && <p className="notice error" role="alert">{notice}</p>}<div className="parcel-list">{rows.map(p => <div className="parcel-row" key={p.parcel_id}><div><strong>{p.tracking_id}</strong><small>{p.slot_no ? `${p.parcel_status === 'COLLECTED' ? 'Previous location: ' : ''}Slot ${p.slot_no} · Compartment ${p.compartment_no}` : 'Awaiting storage'}</small><small>{p.payment_type} · {p.payment_status}</small></div><span className="pill">{p.workflow_status === 'ACTIVE' ? p.parcel_status : p.workflow_status}</span>{p.workflow_status === 'ACTIVE' && p.parcel_status !== 'COLLECTED' && <button className="text-button" onClick={() => onRetrieve(p)}>Manage →</button>}</div>)}</div>{!busy && searched && !rows.length && !notice && <p>No parcels found for this student.</p>}</section>;
+        }}/></label><button type="button" className="secondary" onClick={()=>setScanning(true)}>Scan ID card</button><button className="secondary" disabled={busy}>{busy ? 'Looking up…' : 'Look up'}</button></form>{notice && <p className="notice error" role="alert">{notice}</p>}<div className="parcel-list">{rows.map(p => <div className="parcel-row" key={p.parcel_id}><div><strong>{p.tracking_id}</strong><small>{p.slot_no ? `${p.parcel_status === 'COLLECTED' ? 'Previous location: ' : ''}Slot ${p.slot_no} · Compartment ${p.compartment_no}` : 'Awaiting storage'}</small><small>{p.payment_type} · {p.payment_status}</small></div><span className="pill">{p.workflow_status === 'ACTIVE' ? p.parcel_status : p.workflow_status}</span>{p.workflow_status === 'ACTIVE' && p.parcel_status !== 'COLLECTED' && <button className="text-button" onClick={() => onRetrieve(p)}>Manage →</button>}</div>)}</div>{!busy && searched && !rows.length && !notice && <p>No parcels found for this student.</p>}{scanning&&<BarcodeScanner onScan={scan} onClose={()=>setScanning(false)}/>}</section>;
 }

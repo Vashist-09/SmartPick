@@ -1,3 +1,5 @@
+import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import healthRoutes from './routes/health';
@@ -11,6 +13,7 @@ import operatorRoutes from './routes/operator';
 import { HttpError } from './http';
 export const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', process.env.NODE_ENV === 'production' ? 1 : false);
 const origins = () => (process.env.CORS_ORIGIN || 'http://localhost:5173,http://localhost:5174').split(',').map(s => s.trim());
 app.use(cors({ origin: (origin, cb) => cb(null, !origin || origins().includes(origin)), credentials: true }));
 app.use((_req, res, next) => {
@@ -22,7 +25,7 @@ app.use((_req, res, next) => {
 app.use((req, _res, next) => {
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !req.path.startsWith('/api/device/')) {
         const origin = req.header('origin');
-        if (!origin || !origins().includes(origin))
+        if (!origin || !(origins().includes(origin) || origin === `${req.protocol}://${req.get('host')}`))
             return next(new HttpError(403, 'Request origin is not allowed.'));
     }
     next();
@@ -63,6 +66,14 @@ app.use('/api', pickupRoutes);
 app.use('/api/parcels', parcelRoutes);
 app.use('/api/device', deviceRoutes);
 app.use('/api/operator', operatorRoutes);
+// Keep the existing operator deployment at / and expose the connected student app at /student/.
+const frontendDist = resolve(__dirname, '../../frontend/dist');
+const studentDist = resolve(__dirname, '../../dist');
+if (existsSync(studentDist)) {
+    app.use('/student', express.static(studentDist));
+    app.use('/src', express.static(resolve(studentDist, 'src')));
+}
+if (existsSync(frontendDist)) app.use(express.static(frontendDist));
 app.use((_req, _res, next) => next(new HttpError(404, 'Endpoint not found.', 'NOT_FOUND')));
 app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = error instanceof HttpError ? error.status : error.type === 'entity.parse.failed' ? 400 : error.type === 'entity.too.large' ? 413 : 500;
