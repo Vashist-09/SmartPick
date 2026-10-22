@@ -7,5 +7,5 @@
 <script>try{document.documentElement.dataset.theme=localStorage.getItem('smartpick-theme')||'light'}catch{}</script>
 <link rel="stylesheet" href="/src/styles.css">
 </head>
-<body><div id="app"></div><script type="module" src="/src/app.js"></script></body>
+<body><div id="app"></div><script type="module">import(new URLSearchParams(location.search).get("demo") === "1" ? "/src/app.js" : "/src/live.js");</script></body>
 </html>

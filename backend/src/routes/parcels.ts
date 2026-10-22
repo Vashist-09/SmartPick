@@ -1,60 +1,133 @@
 import { Router } from 'express';
-import { Request, Response, NextFunction } from 'express';
-import { pool, withTx } from '../db';
+import { z } from 'zod';
+import { pool } from '../db';
 import { requireOperator } from '../middleware/auth';
-import { parcelSchema, storeSchema, uuidSchema } from '../schemas';
-
+import { route, parse, id, registration, HttpError } from '../http';
+import { parcelSelect, workflowTx, audit, createPickup, collect, ownedParcel } from '../workflows';
+import { enqueue } from '../mail';
 const router = Router();
-const asyncRoute = (fn: (req:Request,res:Response)=>Promise<unknown>) => (req:Request,res:Response,next:NextFunction) => { void fn(req,res).catch(next); };
 router.use(requireOperator);
-
-router.post('/', asyncRoute(async (req,res) => {
-  const input=parcelSchema.safeParse(req.body); if(!input.success)return res.status(400).json({error:'Invalid request',details:input.error.flatten()});
-  try {
-    const result=await withTx(async c=>{
-      const student=await c.query(`INSERT INTO students(registration_no,student_name) VALUES($1,$2) ON CONFLICT(registration_no) DO UPDATE SET student_name=EXCLUDED.student_name RETURNING student_id`,[input.data.registrationNo,input.data.studentName]);
-      return c.query(`INSERT INTO parcels(tracking_id,student_id,parcel_status,payment_type,payment_status) VALUES($1,$2,'REGISTERED',$3,$4) RETURNING parcel_id,tracking_id,parcel_status`,[input.data.trackingId,student.rows[0].student_id,input.data.paymentType,input.data.paymentStatus ?? (input.data.paymentType==='COD'?'PENDING':'PAID')]);
+router.get('/', route(async (req, res) => {
+    const status = parse(z.enum(['REGISTERED', 'STORED', 'COLLECTED']).default('REGISTERED'), req.query.status);
+    const page = Math.max(0, Number(req.query.page) || 0);
+    const { rows } = await pool.query(`${parcelSelect} WHERE p.parcel_status=$1 AND p.workflow_status='ACTIVE' ORDER BY p.created_at,p.parcel_id LIMIT 50 OFFSET $2`, [status, Math.min(page, 10000) * 50]);
+    res.json(rows);
+}));
+router.get('/:parcelId', route(async (req, res) => res.json(await workflowTx(c => ownedParcel(c, parse(id, req.params.parcelId), req.account!)))));
+router.post('/', route(async (req, res) => {
+    const b = parse(z.object({ registrationNo: registration, studentName: z.string().trim().min(2).max(80), trackingId: z.string().trim().min(1).max(100), paymentType: z.enum(['PREPAID', 'COD']) }), req.body);
+    try {
+        const out = await workflowTx(async (c) => {
+            // Reuse existing identity without silently renaming a student.
+            const found = await c.query(`SELECT student_id FROM students WHERE upper(registration_no)=$1`, [b.registrationNo]);
+            if (found.rowCount && found.rowCount > 1)
+                throw new HttpError(409, 'Duplicate student identities require staff reconciliation.');
+            let student = found.rows[0]?.student_id;
+            if (!student) {
+                const { rows } = await c.query(`INSERT INTO students(registration_no,student_name) VALUES($1,$2) RETURNING student_id`, [b.registrationNo, b.studentName]);
+                student = rows[0].student_id;
+            }
+            const { rows } = await c.query(`INSERT INTO parcels(tracking_id,student_id,parcel_status,payment_type,payment_status) VALUES($1,$2,'REGISTERED',$3,$4) RETURNING parcel_id,tracking_id,parcel_status`, [b.trackingId, student, b.paymentType, b.paymentType === 'COD' ? 'PENDING' : 'PAID']);
+            await audit(c, req.account!.account_id, rows[0].parcel_id, 'REGISTERED');
+            return rows[0];
+        });
+        res.status(201).json(out);
+    }
+    catch (e) {
+        if ((e as any).code === '23505')
+            throw new HttpError(409, 'Tracking ID already exists.');
+        throw e;
+    }
+}));
+router.post('/:parcelId/store', route(async (req, res) => {
+    const parcelId = parse(id, req.params.parcelId), b = parse(z.object({ compartmentId: id }), req.body);
+    await workflowTx(async (c) => {
+        const p = await c.query(`SELECT * FROM parcels WHERE parcel_id=$1 FOR UPDATE`, [parcelId]);
+        if (!p.rows[0])
+            throw new HttpError(404, 'Parcel not found.');
+        if (p.rows[0].workflow_status !== 'ACTIVE' || p.rows[0].parcel_status !== 'REGISTERED')
+            throw new HttpError(409, 'Parcel is not registered.');
+        const comp = await c.query(`SELECT c.*,s.slot_status,s.slot_no FROM compartments c JOIN slots s USING(slot_id) WHERE compartment_id=$1 FOR UPDATE OF c`, [b.compartmentId]);
+        const loc = comp.rows[0];
+        if (!loc)
+            throw new HttpError(404, 'Compartment not found.');
+        if (loc.occupancy_status !== 'EMPTY' || loc.slot_status !== 'ACTIVE')
+            throw new HttpError(409, 'Compartment is no longer available.');
+        await c.query(`UPDATE parcels SET compartment_id=$2,parcel_status='STORED',stored_at=now() WHERE parcel_id=$1`, [parcelId, b.compartmentId]);
+        await c.query(`UPDATE compartments SET occupancy_status='OCCUPIED' WHERE compartment_id=$1`, [b.compartmentId]);
+        await audit(c, req.account!.account_id, parcelId, 'STORED', { slot: loc.slot_no, compartment: loc.compartment_no });
+        await c.query(`INSERT INTO activity_logs(parcel_id,student_id,slot_id,compartment_id,event_type,details) VALUES($1,$2,$3,$4,'PARCEL_STORED',$5)`, [parcelId, p.rows[0].student_id, loc.slot_id, b.compartmentId, { slotNo: loc.slot_no, compartmentNo: loc.compartment_no }]);
+        const { rows: accounts } = await c.query(`SELECT a.* FROM app_accounts a JOIN students st ON upper(st.registration_no)=a.registration_no WHERE st.student_id=$1 AND a.approved_at IS NOT NULL AND a.email_verified_at IS NOT NULL AND a.notifications_enabled=true`, [p.rows[0].student_id]);
+        for (const a of accounts)
+            await enqueue(c, a.account_id, a.email, 'Your parcel is ready', `Parcel ${p.rows[0].tracking_id} is ready at Slot ${loc.slot_no}, Compartment ${loc.compartment_no}.`, 'PARCEL_READY', parcelId);
     });
-    res.status(201).json(result.rows[0]);
-  } catch(error) { if((error as {code?:string}).code==='23505')return res.status(409).json({error:'Tracking ID already exists'}); throw error; }
+    res.json({ status: 'STORED' });
 }));
-
-router.post('/:parcelId/store', asyncRoute(async(req,res)=>{
-  const id=uuidSchema.safeParse(req.params.parcelId), body=storeSchema.safeParse(req.body);
-  if(!id.success||!body.success)return res.status(400).json({error:'Invalid parcel or compartment ID'});
-  const out=await withTx(async c=>{
-    const parcel=await c.query(`SELECT student_id,parcel_status FROM parcels WHERE parcel_id=$1 FOR UPDATE`,[id.data]);
-    if(!parcel.rowCount)return {error:404,message:'Parcel not found'};
-    if(parcel.rows[0].parcel_status!=='REGISTERED')return {error:409,message:'Parcel is not registered'};
-    const comp=await c.query(`SELECT c.occupancy_status,s.slot_id,s.slot_status,s.slot_no,c.compartment_no FROM compartments c JOIN slots s USING(slot_id) WHERE c.compartment_id=$1 FOR UPDATE OF c`,[body.data.compartmentId]);
-    if(!comp.rowCount)return {error:404,message:'Compartment not found'};
-    if(comp.rows[0].occupancy_status!=='EMPTY'||comp.rows[0].slot_status!=='ACTIVE')return {error:409,message:'Compartment is not available'};
-    await c.query(`UPDATE parcels SET compartment_id=$2,parcel_status='STORED',stored_at=NOW() WHERE parcel_id=$1`,[id.data,body.data.compartmentId]);
-    await c.query(`UPDATE compartments SET occupancy_status='OCCUPIED' WHERE compartment_id=$1`,[body.data.compartmentId]);
-    await c.query(`INSERT INTO activity_logs(parcel_id,student_id,slot_id,compartment_id,event_type,details) VALUES($1,$2,$3,$4,'PARCEL_STORED',$5)`,[id.data,parcel.rows[0].student_id,comp.rows[0].slot_id,body.data.compartmentId,{slotNo:comp.rows[0].slot_no,compartmentNo:comp.rows[0].compartment_no}]);
-    return {status:'STORED'};
-  });
-  if('error'in out)return res.status(out.error ?? 500).json({error:out.message}); res.json(out);
+router.post('/:parcelId/retrieve', route(async (req, res) => {
+    const b = parse(z.object({ collectorVerified: z.literal(true), verificationNote: z.string().trim().min(5).max(500) }), req.body);
+    const out = await workflowTx(c => createPickup(c, parse(id, req.params.parcelId), req.account!, b.verificationNote));
+    res.status(202).json(out);
 }));
-
-router.get('/:registrationNo/parcels',asyncRoute(async(req,res)=>{
-  const {rows}=await pool.query(`SELECT p.parcel_id,p.tracking_id,p.parcel_status,p.compartment_id,s.slot_no,c.compartment_no FROM parcels p JOIN students st USING(student_id) LEFT JOIN compartments c USING(compartment_id) LEFT JOIN slots s USING(slot_id) WHERE st.registration_no=$1 ORDER BY p.created_at DESC`,[req.params.registrationNo]);
-  res.json(rows);
+router.post('/:parcelId/payment', route(async (req, res) => {
+    const b = parse(z.object({ reference: z.string().trim().min(3).max(200) }), req.body);
+    await workflowTx(async (c) => {
+        const pid = parse(id, req.params.parcelId);
+        const { rows } = await c.query(`SELECT * FROM parcels WHERE parcel_id=$1 FOR UPDATE`, [pid]);
+        const p = rows[0];
+        if (!p)
+            throw new HttpError(404, 'Parcel not found.');
+        if (p.payment_type !== 'COD' || p.workflow_status !== 'ACTIVE' || p.parcel_status === 'COLLECTED')
+            throw new HttpError(409, 'Payment cannot be recorded for this parcel.');
+        if (p.payment_status === 'PAID')
+            return;
+        await c.query(`UPDATE parcels SET payment_status='PAID' WHERE parcel_id=$1`, [pid]);
+        await audit(c, req.account!.account_id, pid, 'PAYMENT_SETTLED', { reference: b.reference });
+    });
+    res.json({ status: 'PAID' });
 }));
-
-router.post('/:parcelId/retrieve',asyncRoute(async(req,res)=>{
-  const id=uuidSchema.safeParse(req.params.parcelId); if(!id.success)return res.status(400).json({error:'Invalid parcel ID'});
-  const out=await withTx(async c=>{
-    const p=await c.query(`SELECT compartment_id,parcel_status FROM parcels WHERE parcel_id=$1 FOR UPDATE`,[id.data]);
-    if(!p.rowCount)return {error:404,message:'Parcel not found'};
-    if(p.rows[0].parcel_status!=='STORED')return {error:409,message:'Parcel is not stored'};
-    const existing=await c.query(`SELECT command_id FROM hardware_commands WHERE parcel_id=$1 AND command_status IN ('PENDING','ACKNOWLEDGED') LIMIT 1`,[id.data]);
-    if(existing.rowCount)return {commandId:existing.rows[0].command_id,status:'queued'};
-    const device=await c.query(`SELECT device_id FROM hardware_devices ORDER BY created_at LIMIT 1`);
-    if(!device.rowCount)return {error:503,message:'No device configured'};
-    const command=await c.query(`INSERT INTO hardware_commands(device_id,parcel_id,compartment_id,command_type,command_status) VALUES($1,$2,$3,'LIGHT_COMPARTMENT','PENDING') RETURNING command_id`,[device.rows[0].device_id,id.data,p.rows[0].compartment_id]);
-    return {commandId:command.rows[0].command_id,status:'queued'};
-  });
-  if('error'in out)return res.status(out.error ?? 500).json({error:out.message}); res.status(202).json(out);
+router.patch('/:parcelId', route(async (req, res) => {
+    const b = parse(z.object({ registrationNo: registration, reason: z.string().trim().min(5).max(500) }), req.body);
+    await workflowTx(async (c) => {
+        const pid = parse(id, req.params.parcelId);
+        const p = await c.query(`SELECT * FROM parcels WHERE parcel_id=$1 FOR UPDATE`, [pid]);
+        if (!p.rows[0])
+            throw new HttpError(404, 'Parcel not found.');
+        if (p.rows[0].parcel_status !== 'REGISTERED' || p.rows[0].workflow_status !== 'ACTIVE')
+            throw new HttpError(409, 'Only an unstored parcel can change recipient.');
+        const st = await c.query(`SELECT student_id FROM students WHERE upper(registration_no)=$1`, [b.registrationNo]);
+        if (st.rowCount !== 1)
+            throw new HttpError(409, 'Recipient must match one existing student record.');
+        await c.query(`UPDATE parcels SET student_id=$2 WHERE parcel_id=$1`, [pid, st.rows[0].student_id]);
+        await audit(c, req.account!.account_id, pid, 'RECIPIENT_CORRECTED', { fromStudentId: p.rows[0].student_id, toStudentId: st.rows[0].student_id, reason: b.reason });
+    });
+    res.json({ status: 'SAVED' });
+}));
+router.post('/:parcelId/resolve', route(async (req, res) => {
+    const b = parse(z.object({ action: z.enum(['CANCEL', 'RETURN', 'MANUAL_COLLECT']), reason: z.string().trim().min(5).max(500) }), req.body);
+    await workflowTx(async (c) => {
+        const pid = parse(id, req.params.parcelId);
+        const { rows } = await c.query(`SELECT * FROM parcels WHERE parcel_id=$1 FOR UPDATE`, [pid]);
+        const p = rows[0];
+        if (!p)
+            throw new HttpError(404, 'Parcel not found.');
+        if (b.action === 'MANUAL_COLLECT') {
+            if (p.payment_type === 'COD' && p.payment_status !== 'PAID')
+                throw new HttpError(409, 'Record COD settlement first.');
+            await collect(c, pid, req.account!.account_id, b.reason);
+            return;
+        }
+        const target = b.action === 'CANCEL' ? 'CANCELLED' : 'RETURNED';
+        if (p.workflow_status === target)
+            return;
+        if (p.workflow_status !== 'ACTIVE' || (b.action === 'CANCEL' ? p.parcel_status !== 'REGISTERED' : p.parcel_status !== 'STORED'))
+            throw new HttpError(409, 'This action is not valid for the parcel state.');
+        await c.query(`UPDATE parcels SET workflow_status=$2 WHERE parcel_id=$1`, [pid, target]);
+        if (p.compartment_id)
+            await c.query(`UPDATE compartments SET occupancy_status='EMPTY' WHERE compartment_id=$1`, [p.compartment_id]);
+        await c.query(`UPDATE hardware_commands SET command_status='FAILED',completed_at=now() WHERE parcel_id=$1 AND command_status IN ('PENDING','ACKNOWLEDGED')`, [pid]);
+        await c.query(`UPDATE pickup_attempts SET status='CANCELLED',completed_at=now() WHERE parcel_id=$1 AND status='ACTIVE'`, [pid]);
+        await audit(c, req.account!.account_id, pid, target, { reason: b.reason });
+    });
+    res.json({ status: 'RESOLVED' });
 }));
 export default router;

@@ -5,7 +5,11 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "test": "npm run build && node --test test/*.test.cjs",
+    "provision:operator": "npm run build && node dist/provision-operator.js",
+    "preview:seed": "npm run build && node scripts/preview.cjs",
+    "simulate:device": "node scripts/simulate-device.cjs"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
