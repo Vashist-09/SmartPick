@@ -3,17 +3,23 @@ services:
     name: smartpick
     runtime: node
     plan: free
-    buildCommand: npm ci --include=dev --prefix backend && npm ci --include=dev --prefix frontend && npm run build --prefix backend && npm run build --prefix frontend
+    buildCommand: npm ci --include=dev --prefix backend && npm ci --include=dev --prefix frontend && npm run build
     startCommand: npm --prefix backend start
-    healthCheckPath: /api/health/db
+    healthCheckPath: /api/health/ready
     envVars:
       - key: NODE_ENV
         value: production
       - key: DATABASE_URL
         sync: false
-      - key: OPERATOR_LOGIN_PASSWORD
+      - key: STUDENT_APP_ORIGIN
         sync: false
-      - key: SESSION_SECRET
-        generateValue: true
+      - key: CORS_ORIGIN
+        sync: false
+      - key: MAIL_WEBHOOK_URL
+        sync: false
+      - key: MAIL_WEBHOOK_KEY
+        sync: false
+      - key: ENABLE_DEV_MAILBOX
+        value: "false"
       - key: ESP32_API_KEY
         sync: false

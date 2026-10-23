@@ -1,38 +1,23 @@
 import 'dotenv/config';
-import express, { NextFunction, Request, Response } from 'express';
-import cors from 'cors';
-import { resolve } from 'node:path';
-import { existsSync } from 'node:fs';
-import authRoutes from './routes/auth';
-import healthRoutes from './routes/health';
-import slotRoutes from './routes/slots';
-import parcelRoutes from './routes/parcels';
-import deviceRoutes from './routes/device';
-
-const app=express();
-app.set('trust proxy', process.env.NODE_ENV === 'production' ? 1 : false);
-app.use(express.json({limit:'32kb'}));
-if (process.env.CORS_ORIGIN) app.use(cors({ origin: process.env.CORS_ORIGIN, credentials: true }));
-app.use('/api/auth',authRoutes);
-app.use('/api/health',healthRoutes);
-app.use('/api/slots',slotRoutes);
-app.use('/api/parcels',parcelRoutes);
-app.use('/api/students',parcelRoutes);
-app.use('/api/device',deviceRoutes);
-const frontendDist=resolve(__dirname,'../../frontend/dist');
-if(existsSync(frontendDist)) app.use(express.static(frontendDist,{index:'index.html',maxAge:process.env.NODE_ENV==='production'?'1h':0}));
-app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
-  if (error instanceof Error) {
-    console.error('Request failed:', error.message);
-
-    if (process.env.NODE_ENV !== 'production') {
-      console.error(error.stack);
-    }
-  } else {
-    console.error('Request failed with a non-Error value:', error);
-  }
-
-  res.status(500).json({ error: 'Internal server error' });
+import { app } from './app';
+import { deliverMail } from './mail';
+import { workflowTx, expireWork } from './workflows';
+import { pool } from './db';
+const port = Number(process.env.PORT) || 5050;
+const server = app.listen(port, () => console.log(`SmartPick backend listening on ${port}`));
+const mailTimer = setInterval(() => {
+    void deliverMail().catch(() => console.error('Mail worker unavailable.'));
+}, 5000);
+const workTimer = setInterval(() => {
+    void workflowTx(expireWork).catch(() => console.error('Workflow cleanup unavailable.'));
+}, 10000);
+const cleanupTimer = setInterval(() => {
+    void pool.query(`DELETE FROM app_sessions WHERE expires_at<=now(); DELETE FROM app_challenges WHERE expires_at<=now(); UPDATE app_notifications SET body='Expired link',status='SENT' WHERE kind IN ('VERIFY','RESET') AND created_at<now()-interval '30 minutes' AND body<>'Expired link'`).catch(() => console.error('Session cleanup unavailable.'));
+}, 60000);
+for (const timer of [mailTimer, workTimer, cleanupTimer])
+    timer.unref();
+process.on('SIGTERM', () => {
+    for (const timer of [mailTimer, workTimer, cleanupTimer])
+        clearInterval(timer);
+    server.close(() => void pool.end());
 });
-const port=Number(process.env.PORT)||5050;
-app.listen(port,()=>console.log(`SmartPick backend listening on ${port}`));
