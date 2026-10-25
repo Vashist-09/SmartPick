@@ -1,22 +1,31 @@
 import { Router } from 'express';
 import { Request, Response, NextFunction } from 'express';
-import { pool, withTx } from '../db';
+import { withTx } from '../db';
 import { requireOperator } from '../middleware/auth';
 import { parcelSchema, storeSchema, uuidSchema } from '../schemas';
+import { resolveStudent } from '../students';
 
 const router = Router();
 const asyncRoute = (fn: (req:Request,res:Response)=>Promise<unknown>) => (req:Request,res:Response,next:NextFunction) => { void fn(req,res).catch(next); };
 router.use(requireOperator);
 
 router.post('/', asyncRoute(async (req,res) => {
-  const input=parcelSchema.safeParse(req.body); if(!input.success)return res.status(400).json({error:'Invalid request',details:input.error.flatten()});
+  const input=parcelSchema.safeParse(req.body); if(!input.success)return res.status(400).json({error:input.error.issues.map(i=>`${i.path.join('.')||'request'}: ${i.message}`).join('; ')});
   try {
     const result=await withTx(async c=>{
-      const student=await c.query(`INSERT INTO students(registration_no,student_name) VALUES($1,$2) ON CONFLICT(registration_no) DO UPDATE SET student_name=EXCLUDED.student_name RETURNING student_id`,[input.data.registrationNo,input.data.studentName]);
-      return c.query(`INSERT INTO parcels(tracking_id,student_id,parcel_status,payment_type,payment_status) VALUES($1,$2,'REGISTERED',$3,$4) RETURNING parcel_id,tracking_id,parcel_status`,[input.data.trackingId,student.rows[0].student_id,input.data.paymentType,input.data.paymentStatus ?? (input.data.paymentType==='COD'?'PENDING':'PAID')]);
+      // Reuse an existing student whose registration number differs only in letter case, so a
+      // student is not split into two records (which would hide parcels from scanned lookups).
+      const match=await resolveStudent(c,input.data.registrationNo);
+      if(match.kind==='ambiguous')return {error:409,message:'More than one student matches that registration number when letter case is ignored. Enter it exactly as registered.'};
+      const student=match.kind==='found'
+        ? await c.query(`UPDATE students SET student_name=$2 WHERE student_id=$1 RETURNING student_id,registration_no`,[match.studentId,input.data.studentName])
+        : await c.query(`INSERT INTO students(registration_no,student_name) VALUES($1,$2) ON CONFLICT(registration_no) DO UPDATE SET student_name=EXCLUDED.student_name RETURNING student_id,registration_no`,[input.data.registrationNo,input.data.studentName]);
+      const parcel=await c.query(`INSERT INTO parcels(tracking_id,student_id,parcel_status,payment_type,payment_status) VALUES($1,$2,'REGISTERED',$3,$4) RETURNING parcel_id,tracking_id,parcel_status`,[input.data.trackingId,student.rows[0].student_id,input.data.paymentType,input.data.paymentStatus ?? (input.data.paymentType==='COD'?'PENDING':'PAID')]);
+      return {...parcel.rows[0],registration_no:student.rows[0].registration_no};
     });
-    res.status(201).json(result.rows[0]);
-  } catch(error) { if((error as {code?:string}).code==='23505')return res.status(409).json({error:'Tracking ID already exists'}); throw error; }
+    if('error'in result)return res.status(result.error).json({error:result.message});
+    res.status(201).json(result);
+  } catch(error) { if((error as {code?:string;constraint?:string}).code==='23505')return res.status(409).json({error:'A parcel with this tracking ID is already registered'}); throw error; }
 }));
 
 router.post('/:parcelId/store', asyncRoute(async(req,res)=>{
@@ -37,11 +46,6 @@ router.post('/:parcelId/store', asyncRoute(async(req,res)=>{
   if('error'in out)return res.status(out.error ?? 500).json({error:out.message}); res.json(out);
 }));
 
-router.get('/:registrationNo/parcels',asyncRoute(async(req,res)=>{
-  const {rows}=await pool.query(`SELECT p.parcel_id,p.tracking_id,p.parcel_status,p.compartment_id,s.slot_no,c.compartment_no FROM parcels p JOIN students st USING(student_id) LEFT JOIN compartments c USING(compartment_id) LEFT JOIN slots s USING(slot_id) WHERE st.registration_no=$1 ORDER BY p.created_at DESC`,[req.params.registrationNo]);
-  res.json(rows);
-}));
-
 router.post('/:parcelId/retrieve',asyncRoute(async(req,res)=>{
   const id=uuidSchema.safeParse(req.params.parcelId); if(!id.success)return res.status(400).json({error:'Invalid parcel ID'});
   const out=await withTx(async c=>{
@@ -49,11 +53,11 @@ router.post('/:parcelId/retrieve',asyncRoute(async(req,res)=>{
     if(!p.rowCount)return {error:404,message:'Parcel not found'};
     if(p.rows[0].parcel_status!=='STORED')return {error:409,message:'Parcel is not stored'};
     const existing=await c.query(`SELECT command_id FROM hardware_commands WHERE parcel_id=$1 AND command_status IN ('PENDING','ACKNOWLEDGED') LIMIT 1`,[id.data]);
-    if(existing.rowCount)return {commandId:existing.rows[0].command_id,status:'queued'};
+    if(existing.rowCount)return {commandId:existing.rows[0].command_id,status:'queued',existing:true};
     const device=await c.query(`SELECT device_id FROM hardware_devices ORDER BY created_at LIMIT 1`);
     if(!device.rowCount)return {error:503,message:'No device configured'};
     const command=await c.query(`INSERT INTO hardware_commands(device_id,parcel_id,compartment_id,command_type,command_status) VALUES($1,$2,$3,'LIGHT_COMPARTMENT','PENDING') RETURNING command_id`,[device.rows[0].device_id,id.data,p.rows[0].compartment_id]);
-    return {commandId:command.rows[0].command_id,status:'queued'};
+    return {commandId:command.rows[0].command_id,status:'queued',existing:false};
   });
   if('error'in out)return res.status(out.error ?? 500).json({error:out.message}); res.status(202).json(out);
 }));
