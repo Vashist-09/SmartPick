@@ -14,6 +14,3 @@
 .logout{min-height:40px;padding:0 14px;border:1px solid var(--line);border-radius:10px;background:transparent;color:inherit;}
 .top-meta{gap:14px;}
 @media(max-width:560px){.login-shell{padding:20px;}.login-card{margin-top:15vh;}.operator{display:none;}.tracking-input{flex-wrap:wrap}.scan-button{width:100%}.scanner-dialog{padding:17px}}
-
-label{display:flex;flex-direction:column;gap:7px;font-size:12px;margin:10px 0}label input{height:40px;padding:8px 10px;border:1px solid #cbd7cb;border-radius:6px;background:#fff;font:inherit}button:disabled{opacity:.5;cursor:not-allowed}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #9ead3d;outline-offset:3px}.grow{flex:1;min-width:0}.inline-form{align-items:stretch}.inline-form button{min-height:40px;align-self:end;margin-bottom:10px}.live-actions{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}.live-actions button{min-height:40px}.login-panel{max-width:600px;margin:70px auto}.pickup-progress{background:#e8f0e4;border-radius:8px;padding:16px;overflow-wrap:anywhere}.panel h2{font-size:19px}.panel>p{font-size:13px;line-height:1.6}.parcel-row small{overflow-wrap:anywhere}
-.check-label{flex-direction:row;align-items:center}.check-label input{width:20px;height:20px}

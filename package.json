@@ -4,12 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node server.mjs",
+    "dev": "npm --prefix frontend run dev",
     "dev:backend": "npm --prefix backend run dev",
     "start": "npm --prefix backend start",
-    "build": "npm run build --prefix backend && npm run build --prefix frontend && npm run build:student",
-    "dev:operator": "npm --prefix frontend run dev -- --port 5174 --strictPort",
-    "test": "node --test",
-    "build:student": "node build.mjs"
+    "build": "npm run build --prefix backend && npm run build --prefix frontend"
   }
 }

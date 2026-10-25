@@ -1,70 +1,58 @@
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { NextFunction, Request, Response } from 'express';
-import { pool } from '../db';
-import { digest } from '../security';
-import { HttpError } from '../http';
-export type Account = {
-    account_id: string;
-    email: string;
-    registration_no: string | null;
-    full_name: string;
-    phone: string;
-    role: 'STUDENT' | 'OPERATOR';
-    email_verified_at: string | null;
-    approved_at: string | null;
-    notifications_enabled: boolean;
-};
-declare global {
-    namespace Express {
-        interface Request {
-            account?: Account;
-        }
-    }
+
+const COOKIE_NAME = 'smartpick_operator';
+const SESSION_TTL_SECONDS = 60 * 60 * 12;
+
+function signature(expiresAt: string) {
+  const secret = process.env.SESSION_SECRET;
+  if (!secret || secret.length < 32) return null;
+  return createHmac('sha256', secret).update(expiresAt).digest('base64url');
 }
-export function cookieName(req: Request) {
-    return req.header('x-smartpick-client') === 'operator' ? 'smartpick_operator' : 'smartpick_session';
+
+function safeEqual(left: string, right: string) {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
-export function sessionToken(req: Request) {
-    const name = cookieName(req) + '=';
-    const cookie = req.headers.cookie?.split(';').map(s => s.trim()).find(s => s.startsWith(name));
-    return cookie?.slice(name.length) || '';
+
+function cookieValue(req: Request, name: string) {
+  const cookies = req.headers.cookie?.split(';') ?? [];
+  const entry = cookies.map((part) => part.trim()).find((part) => part.startsWith(`${name}=`));
+  return entry ? entry.slice(name.length + 1) : '';
 }
-export function requireAccount(req: Request, _res: Response, next: NextFunction) {
-    void (async () => {
-        const secret = sessionToken(req);
-        if (!secret)
-            throw new HttpError(401, 'Please log in.', 'SESSION_REQUIRED');
-        const { rows } = await pool.query(`SELECT a.account_id,a.email,a.registration_no,a.full_name,a.phone,a.role,a.email_verified_at,a.approved_at,a.notifications_enabled FROM app_sessions s JOIN app_accounts a USING(account_id) WHERE s.token_hash=$1 AND s.expires_at>now()`, [digest(secret)]);
-        if (!rows[0])
-            throw new HttpError(401, 'Your session expired. Please log in.', 'SESSION_EXPIRED');
-        req.account = rows[0];
-        next();
-    })().catch(next);
+
+export function hasOperatorSession(req: Request) {
+  const token = cookieValue(req, COOKIE_NAME);
+  const [expiresAt, nonce, suppliedSignature] = token.split('.');
+  if (!expiresAt || !nonce || !suppliedSignature || !Number.isFinite(Number(expiresAt)) || Number(expiresAt) <= Date.now()) return false;
+  const expected = signature(`${expiresAt}.${nonce}`);
+  return Boolean(expected && safeEqual(suppliedSignature, expected));
 }
+
+export function setOperatorSession(res: Response) {
+  const expiresAt = String(Date.now() + SESSION_TTL_SECONDS * 1000);
+  const nonce = randomBytes(32).toString('base64url');
+  const signed = signature(`${expiresAt}.${nonce}`);
+  if (!signed) throw new Error('SESSION_SECRET is not configured');
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=${expiresAt}.${nonce}.${signed}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_SECONDS}${secure}`);
+}
+
+export function clearOperatorSession(res: Response) {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure}`);
+}
+
 export function requireOperator(req: Request, res: Response, next: NextFunction) {
-    requireAccount(req, res, error => {
-        if (error)
-            return next(error);
-        if (req.account?.role !== 'OPERATOR')
-            return next(new HttpError(403, 'Staff access required.'));
-        next();
-    });
+  if (hasOperatorSession(req)) return next();
+  const key = process.env.OPERATOR_API_KEY;
+  if (!key || !safeEqual(req.header('x-operator-key') ?? '', key)) return res.status(401).json({ error: 'Unauthorized' });
+  next();
 }
-export function requireStudent(req: Request, res: Response, next: NextFunction) {
-    requireAccount(req, res, error => {
-        if (error)
-            return next(error);
-        if (req.account?.role !== 'STUDENT')
-            return next(new HttpError(403, 'Student access required.'));
-        if (!req.account.email_verified_at)
-            return next(new HttpError(403, 'Verify your email first.', 'EMAIL_UNVERIFIED'));
-        if (!req.account.approved_at)
-            return next(new HttpError(403, 'Staff must approve your student identity.', 'IDENTITY_PENDING'));
-        next();
-    });
-}
-export function requireDevice(req: Request, _res: Response, next: NextFunction) {
-    const key = process.env.ESP32_API_KEY;
-    if (!key || digest(req.header('x-device-key') || '') !== digest(key))
-        return next(new HttpError(401, 'Device authentication failed.'));
-    next();
+
+export function requireDevice(req: Request, res: Response, next: NextFunction) {
+  const key = process.env.ESP32_API_KEY;
+  if (!key || !safeEqual(req.header('x-device-key') ?? '', key)) return res.status(401).json({ error: 'Unauthorized' });
+  next();
 }

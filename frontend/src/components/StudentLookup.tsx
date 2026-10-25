@@ -1,77 +1,39 @@
-import { useCallback, FormEvent, useState, useRef, useEffect } from 'react';
-import { BarcodeScanner } from './BarcodeScanner';
+import { FormEvent, useState } from 'react';
 import { api } from '../api';
 import type { Parcel } from '../types';
-export function StudentLookup({ onRetrieve, revision }: {
-    onRetrieve: (p: Parcel | null) => void;
-    revision: number;
-}) {
-    const [rows, setRows] = useState<Parcel[]>([]), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false), [searched, setSearched] = useState(false), [lookupRegistration, setLookupRegistration] = useState('');
-    const seq = useRef(0);
-    const formRef = useRef<HTMLFormElement>(null);
-    const [scanning,setScanning] = useState(false);
-    const scan = useCallback((value:string)=>{setScanning(false);const input=formRef.current?.elements.namedItem('registrationNo') as HTMLInputElement|null;if(input){input.value=value;formRef.current?.requestSubmit();}},[]);
-    useEffect(() => {
-        setRows([]);
-        setLookupRegistration('');
-        setSearched(false);
-        onRetrieve(null);
-        seq.current++;
-        setBusy(false);
-    }, [revision]);
-    useEffect(() => {
-        if (!lookupRegistration)
-            return;
-        const current = seq.current;
-        let stopped = false;
-        const timer = setInterval(() => {
-            void api<Parcel[]>(`/api/operator/students/${encodeURIComponent(lookupRegistration)}/parcels`).then(data => {
-                if (!stopped && current === seq.current) {
-                    setRows(data);
-                    setNotice('');
-                }
-            }).catch(error => {
-                if (!stopped && current === seq.current)
-                    setNotice(error.message);
-            });
-        }, 10000);
-        return () => {
-            stopped = true;
-            clearInterval(timer);
-        };
-    }, [lookupRegistration]);
-    async function submit(e: FormEvent<HTMLFormElement>) {
-        e.preventDefault();
-        const reg = String(new FormData(e.currentTarget).get('registrationNo')).trim();
-        setLookupRegistration('');
-        const current = ++seq.current;
-        onRetrieve(null);
-        setRows([]);
-        setNotice('');
-        setBusy(true);
-        setSearched(true);
-        try {
-            const data = await api<Parcel[]>(`/api/operator/students/${encodeURIComponent(reg)}/parcels`);
-            if (current === seq.current) {
-                setRows(data);
-                setLookupRegistration(reg);
-            }
-        }
-        catch (e) {
-            if (current === seq.current)
-                setNotice(e instanceof Error ? e.message : 'Lookup failed.');
-        }
-        finally {
-            if (current === seq.current)
-                setBusy(false);
-        }
-    }
-    return <section className="panel"><h2>Find a student</h2><form ref={formRef} className="inline-form" onSubmit={submit}><label className="grow">Registration number<input name="registrationNo" required maxLength={30} onChange={() => {
-            seq.current++;
-            setRows([]);
-            setLookupRegistration('');
-            setSearched(false);
-            setBusy(false);
-            onRetrieve(null);
-        }}/></label><button type="button" className="secondary" onClick={()=>setScanning(true)}>Scan ID card</button><button className="secondary" disabled={busy}>{busy ? 'Looking up…' : 'Look up'}</button></form>{notice && <p className="notice error" role="alert">{notice}</p>}<div className="parcel-list">{rows.map(p => <div className="parcel-row" key={p.parcel_id}><div><strong>{p.tracking_id}</strong><small>{p.slot_no ? `${p.parcel_status === 'COLLECTED' ? 'Previous location: ' : ''}Slot ${p.slot_no} · Compartment ${p.compartment_no}` : 'Awaiting storage'}</small><small>{p.payment_type} · {p.payment_status}</small></div><span className="pill">{p.workflow_status === 'ACTIVE' ? p.parcel_status : p.workflow_status}</span>{p.workflow_status === 'ACTIVE' && p.parcel_status !== 'COLLECTED' && <button className="text-button" onClick={() => onRetrieve(p)}>Manage →</button>}</div>)}</div>{!busy && searched && !rows.length && !notice && <p>No parcels found for this student.</p>}{scanning&&<BarcodeScanner onScan={scan} onClose={()=>setScanning(false)}/>}</section>;
+import { BarcodeScanner } from './BarcodeScanner';
+
+export function StudentLookup(){
+  const [registrationNo,setRegistrationNo]=useState('');
+  const [rows,setRows]=useState<Parcel[]>([]);
+  const [notice,setNotice]=useState('');
+  const [scanning,setScanning]=useState(false);
+  const [loading,setLoading]=useState(false);
+  const [queueing,setQueueing]=useState<string|null>(null);
+  const [searched,setSearched]=useState(false);
+
+  async function lookup(registration:string){
+    const value=registration.trim();
+    if(!value)return;
+    setRegistrationNo(value);setNotice('');setRows([]);setSearched(false);setLoading(true);
+    try{setRows(await api<Parcel[]>(`/api/students/${encodeURIComponent(value)}/parcels`));setSearched(true);}
+    catch(err){setNotice(err instanceof Error?err.message:'Lookup failed.');}
+    finally{setLoading(false);}
+  }
+  async function submit(e:FormEvent<HTMLFormElement>){e.preventDefault();await lookup(registrationNo);}
+  async function lightCompartment(parcel:Parcel){
+    setQueueing(parcel.parcel_id);setNotice('');
+    try{await api<{commandId:string;status:string}>(`/api/parcels/${encodeURIComponent(parcel.parcel_id)}/retrieve`,{method:'POST'});setNotice(`Light command queued for Slot ${parcel.slot_no}, Compartment ${parcel.compartment_no}. The ESP32 will activate it when it polls the server.`);}
+    catch(err){setNotice(err instanceof Error?err.message:'Could not queue the compartment light.');}
+    finally{setQueueing(null);}
+  }
+
+  return <section className="panel">
+    <div className="section-heading"><div><span className="eyebrow">STUDENT PICKUP</span><h2>Find a student</h2></div><span className="step">02</span></div>
+    <form className="inline-form" onSubmit={submit}><input value={registrationNo} onChange={e=>setRegistrationNo(e.target.value)} required placeholder="Student registration number"/><button type="button" className="secondary" onClick={()=>setScanning(true)}>Scan ID card</button><button className="secondary" disabled={loading}>{loading?'Searching…':'Look up'}</button></form>
+    {notice&&<p className={`notice ${notice.includes('Could not')||notice.includes('failed')?'error':''}`}>{notice}</p>}
+    {rows.length>0&&<div className="parcel-list">{rows.map(p=><div className="parcel-row" key={p.parcel_id}><div><strong>{p.tracking_id}</strong><small>{p.slot_no!==null&&p.compartment_no!==null?`Slot ${p.slot_no} · Compartment ${p.compartment_no}`:'Not stored yet'}</small></div><span className={`pill ${p.parcel_status.toLowerCase()}`}>{p.parcel_status}</span>{p.parcel_status==='STORED'&&<button className="text-button" disabled={queueing!==null} onClick={()=>void lightCompartment(p)}>{queueing===p.parcel_id?'Queuing…':'Light compartment ↗'}</button>}</div>)}</div>}
+    {!loading&&!notice&&rows.length===0&&<p className="hint">{searched?'No parcels found for this registration number.':'Scan a student ID or enter their registration number to see parcels and storage locations.'}</p>}
+    {scanning&&<BarcodeScanner onScan={value=>{setScanning(false);void lookup(value);}} onClose={()=>setScanning(false)}/>}
+  </section>;
 }
